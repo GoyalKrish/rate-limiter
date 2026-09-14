@@ -1,0 +1,210 @@
+rish@fedora:~/Documents/Projects/rate-limiter$ cd "/home/krish/Documents/Projects/rate-limiter/" && g++ benchmark.cc -o benchmark && "/home/krish/Documents/Projects/rate-limiter/"benchmark
+========================================
+Rate Limiter Benchmark
+========================================
+Requests              : 10000000
+Arrival rate          : 100000 req/s
+Token capacity        : 10
+Token refill rate     : 1 tokens/s
+Random seed           : 42
+========================================
+
+Generating arrival schedule...
+Arrival schedule ready.
+
+Starting TokenBucket benchmark...
+
+========================================
+TokenBucket
+========================================
+Total requests       : 10000000
+Completed            : 10000000
+Accepted             : 10
+Rejected             : 9999990
+Wall time (seconds)  : 100.024
+Throughput (req/s)   : 99975.669
+
+Latency (microseconds)
+p50                  : 0.071
+p95                  : 0.143
+p99                  : 0.169
+max                  : 811.236
+
+Worker metrics
+Busy time (seconds)  : 0.000
+Idle time (seconds)  : 0.000
+Worker utilization   : 0.000%
+Max queue depth      : 0
+========================================
+
+Starting QueueProcess benchmark...
+
+========================================
+QueueProcess
+========================================
+Total requests       : 10000000
+Completed            : 10000000
+Accepted             : 10000000
+Rejected             : 0
+Wall time (seconds)  : 100.024
+Throughput (req/s)   : 99975.629
+
+Latency (microseconds)
+p50                  : 2.428
+p95                  : 4.154
+p99                  : 6.958
+max                  : 2098.390
+
+Worker metrics
+Busy time (seconds)  : 9.216
+Idle time (seconds)  : 84.711
+Worker utilization   : 9.812%
+Max queue depth      : 1
+========================================
+krish@fedora:~/Documents/Projects/rate-limiter$     
+
+
+____
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+krish@fedora:~/Documents/Projects/rate-limiter$ ./monitor.sh 100000 1000 100000
+========================================
+Rate Limiter Benchmark Monitor
+========================================
+Output directory : benchmark_results_20260914_141735
+Arrival rate     : 100000 req/s
+Capacity         : 1000
+Refill rate      : 100000
+
+Starting benchmark...
+Benchmark PID: 52277
+Starting CPU and memory monitoring...
+
+Benchmark finished.
+========================================
+Results
+========================================
+
+Benchmark log:
+========================================
+Rate Limiter Benchmark
+========================================
+Requests              : 10000000
+Arrival rate          : 100000 req/s
+Token capacity        : 1000
+Token refill rate     : 100000 tokens/s
+Random seed           : 42
+========================================
+
+Generating arrival schedule...
+Arrival schedule ready.
+
+Starting TokenBucket benchmark...
+
+========================================
+TokenBucket
+========================================
+Total requests       : 10000000
+Completed            : 10000000
+Accepted             : 1500
+Rejected             : 9998500
+Wall time (seconds)  : 100.024
+Throughput (req/s)   : 99975.668
+
+Latency (microseconds)
+p50                  : 0.064
+p95                  : 0.088
+p99                  : 0.175
+max                  : 143.921
+
+Worker metrics
+Busy time (seconds)  : 0.000
+Idle time (seconds)  : 0.000
+Worker utilization   : 0.000%
+Max queue depth      : 0
+========================================
+
+Starting QueueProcess benchmark...
+
+========================================
+QueueProcess
+========================================
+Total requests       : 10000000
+Completed            : 10000000
+Accepted             : 10000000
+Rejected             : 0
+Wall time (seconds)  : 100.024
+Throughput (req/s)   : 99975.631
+
+Latency (microseconds)
+p50                  : 2.321
+p95                  : 3.722
+p99                  : 7.098
+max                  : 1512.662
+
+Worker metrics
+Busy time (seconds)  : 8.499
+Idle time (seconds)  : 85.948
+Worker utilization   : 8.999%
+Max queue depth      : 1
+========================================
+
+System resource usage:
+        Command being timed: "./benchmark 100000 1000 100000"
+        User time (seconds): 31.16
+        System time (seconds): 22.25
+        Percent of CPU this job got: 26%
+        Elapsed (wall clock) time (h:mm:ss or m:ss): 3:22.11
+        Average shared text size (kbytes): 0
+        Average unshared data size (kbytes): 0
+        Average stack size (kbytes): 0
+        Average total size (kbytes): 0
+        Maximum resident set size (kbytes): 160108
+        Average resident set size (kbytes): 0
+        Major (requiring I/O) page faults: 0
+        Minor (reclaiming a frame) page faults: 58765
+        Voluntary context switches: 22417188
+        Involuntary context switches: 345
+        Swaps: 0
+        File system inputs: 0
+        File system outputs: 8
+        Socket messages sent: 0
+        Socket messages received: 0
+        Signals delivered: 0
+        Page size (bytes): 4096
+        Exit status: 0
+
+Files saved in:
+benchmark_results_20260914_141735
+krish@fedora:~/Documents/Projects/rate-limiter$ 
+

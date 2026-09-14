@@ -1,34 +1,34 @@
 #include "crow.h"
 #include "RateLimiter.h"
 
-// crow::response hello(){
-//     return crow::response(200, "hello user " + to_string(nowTime()));
-// }
+crow::response hello(){
+    return crow::response(200, "hello user " + to_string(nowTime()));
+}
 
-// int main(){
-//     TokenBucket rh(10,1);
+void b(){
+    TokenBucket rh(10,1);
 
-//     crow::SimpleApp app;
+    crow::SimpleApp app;
 
     
 
-//     CROW_ROUTE(app, "/")([&rh]() {
+    CROW_ROUTE(app, "/")([&rh]() {
 
-//         if (rh.allowRequest()) {
-//             return crow::response(200, "Request allowed at " + to_string(nowTime()));
-//         }
+        if (rh.allowRequest()) {
+            return crow::response(200, "Request allowed at " + to_string(nowTime()));
+        }
 
-//         return crow::response(429, "Too many requests");
-//     });
+        return crow::response(429, "Too many requests");
+    });
 
-//     app.port(8080).multithreaded().run();
-// }
-
-
+    app.port(8080).multithreaded().run();
+}
 
 
-int main(){
-    QueueProcess qp(10);
+
+
+void a(){
+    QueueProcess qp(0);
 
     thread worker(&QueueProcess::processor, &qp);
 

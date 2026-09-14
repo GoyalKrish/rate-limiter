@@ -1,11 +1,16 @@
-    #include<chrono>
-    #include<algorithm>
-    #include<mutex>
-    #include<queue>
-    using namespace std;
+#include <chrono>
+#include <algorithm>
+#include <mutex>
+#include <queue>
+#include <functional>
+#include <condition_variable>
+#include <thread>
+#include <future>
+#include <memory>
 
+using namespace std;
     long long nowTime(){
-        return chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now().time_since_epoch()).count();
+        return chrono::duration_cast<chrono::nanoseconds>(chrono::steady_clock::now().time_since_epoch()).count();
     }
 
     class TokenBucket{
@@ -42,16 +47,20 @@
 
 
     class QueueProcess{
+        public:
         queue<function<void()>> q;
         long long waiting_time_ms;
+
         mutex mtx;
         condition_variable cv;
 
         bool stopped = false;
 
-        public:
             QueueProcess(long long req_per_sec){
-                waiting_time_ms = 1000 / req_per_sec;
+                if(req_per_sec == 0)
+                    waiting_time_ms = 0;
+                else
+                    waiting_time_ms = 1000 / req_per_sec;
             }
 
             void processor(){
@@ -70,8 +79,6 @@
                     }
 
                     fn();
-
-                    this_thread::sleep_for(chrono::milliseconds(waiting_time_ms));
                 }
             }
 

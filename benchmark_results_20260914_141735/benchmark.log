@@ -1,0 +1,62 @@
+========================================
+Rate Limiter Benchmark
+========================================
+Requests              : 10000000
+Arrival rate          : 100000 req/s
+Token capacity        : 1000
+Token refill rate     : 100000 tokens/s
+Random seed           : 42
+========================================
+
+Generating arrival schedule...
+Arrival schedule ready.
+
+Starting TokenBucket benchmark...
+
+========================================
+TokenBucket
+========================================
+Total requests       : 10000000
+Completed            : 10000000
+Accepted             : 1500
+Rejected             : 9998500
+Wall time (seconds)  : 100.024
+Throughput (req/s)   : 99975.668
+
+Latency (microseconds)
+p50                  : 0.064
+p95                  : 0.088
+p99                  : 0.175
+max                  : 143.921
+
+Worker metrics
+Busy time (seconds)  : 0.000
+Idle time (seconds)  : 0.000
+Worker utilization   : 0.000%
+Max queue depth      : 0
+========================================
+
+Starting QueueProcess benchmark...
+
+========================================
+QueueProcess
+========================================
+Total requests       : 10000000
+Completed            : 10000000
+Accepted             : 10000000
+Rejected             : 0
+Wall time (seconds)  : 100.024
+Throughput (req/s)   : 99975.631
+
+Latency (microseconds)
+p50                  : 2.321
+p95                  : 3.722
+p99                  : 7.098
+max                  : 1512.662
+
+Worker metrics
+Busy time (seconds)  : 8.499
+Idle time (seconds)  : 85.948
+Worker utilization   : 8.999%
+Max queue depth      : 1
+========================================
