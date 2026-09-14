@@ -1,13 +1,14 @@
     #include<chrono>
     #include<algorithm>
     #include<mutex>
+    #include<queue>
     using namespace std;
 
     long long nowTime(){
         return chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now().time_since_epoch()).count();
     }
 
-    class RateLimiter{
+    class TokenBucket{
         double tokens;
         unsigned int capacity;
         unsigned int refill_rate;
@@ -15,7 +16,7 @@
         mutex mtx;
 
         public:
-            RateLimiter(int cap, int rate){
+            TokenBucket(int cap, int rate){
                 tokens = cap;
                 capacity = cap;
                 refill_rate = rate;
@@ -36,5 +37,51 @@
                     --tokens;
                     return true;
                 }else return false;
+            }
+    };
+
+
+    class QueueProcess{
+        queue<function<void()>> q;
+        long long waiting_time_ms;
+        mutex mtx;
+        condition_variable cv;
+
+        bool stopped = false;
+
+        public:
+            QueueProcess(long long req_per_sec){
+                waiting_time_ms = 1000 / req_per_sec;
+            }
+
+            void processor(){
+                while(true){
+                    function<void()> fn;
+                    {
+                        unique_lock<mutex> lock(mtx);
+                        cv.wait(lock,[&](){
+                            return !q.empty() || stopped;
+                        });
+
+                        if(stopped && q.empty()) return;
+
+                        fn = q.front();
+                        q.pop();
+                    }
+
+                    fn();
+
+                    this_thread::sleep_for(chrono::milliseconds(waiting_time_ms));
+                }
+            }
+
+
+            void newRequest(function<void()> fn){
+                {
+                    lock_guard<mutex> lock(mtx);
+                    q.push(fn);
+                }
+
+                cv.notify_one();
             }
     };
