@@ -21,7 +21,7 @@ using namespace std;
         mutex mtx;
 
         public:
-            TokenBucket(int cap, int rate){
+            TokenBucket(unsigned int cap,unsigned int rate){
                 tokens = cap;
                 capacity = cap;
                 refill_rate = rate;
@@ -35,7 +35,7 @@ using namespace std;
                 long long diff = now_time - last_time;
                 last_time = now_time;
                 
-                double canAdd = (diff / 1000.0) * refill_rate;
+                double canAdd = (diff / 1e9) * refill_rate;
                 tokens = min((double)capacity, tokens + canAdd);
 
                 if(tokens >= 1){
@@ -49,18 +49,24 @@ using namespace std;
     class QueueProcess{
         public:
         queue<function<void()>> q;
-        long long waiting_time_ms;
+        long long waiting_time_ns;
+        size_t max_queue_size;
+        chrono::steady_clock::time_point next_exec_time;
 
         mutex mtx;
         condition_variable cv;
 
         bool stopped = false;
 
-            QueueProcess(long long req_per_sec){
+            QueueProcess(long long req_per_sec, size_t max_size){
                 if(req_per_sec == 0)
-                    waiting_time_ms = 0;
+                    waiting_time_ns = 0;
                 else
-                    waiting_time_ms = 1000 / req_per_sec;
+                    waiting_time_ns = 1e9 / req_per_sec;
+
+                max_queue_size = max_size;
+                next_exec_time = chrono::steady_clock::now();
+
             }
 
             void processor(){
@@ -77,18 +83,34 @@ using namespace std;
                         fn = q.front();
                         q.pop();
                     }
-
+                    chrono::steady_clock::time_point now = chrono::steady_clock::now();
+                    if(now < next_exec_time) this_thread::sleep_until(next_exec_time); 
                     fn();
+                    next_exec_time += chrono::nanoseconds(waiting_time_ns);
+                    now = chrono::steady_clock::now();
+                    if(next_exec_time < now) next_exec_time = now;
                 }
             }
 
 
-            void newRequest(function<void()> fn){
+            bool newRequest(function<void()> fn){
                 {
                     lock_guard<mutex> lock(mtx);
+                    if(stopped) return false;
+                    if(q.size() >= max_queue_size) return false;
                     q.push(fn);
                 }
 
                 cv.notify_one();
+                return true;
+            }
+
+            void stop(){
+                {
+                    lock_guard<mutex> lock(mtx);
+                    stopped = true;
+                }
+                cv.notify_all();
             }
     };
+
