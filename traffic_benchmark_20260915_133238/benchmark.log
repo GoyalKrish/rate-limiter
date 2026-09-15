@@ -1,0 +1,124 @@
+========================================
+Realistic Traffic Rate-Limiter Benchmark
+========================================
+Rate limit         : 10000 req/s
+Token capacity     : 1000
+Queue capacity     : 5000
+Random seed        : 42
+Traffic model      : Poisson + flash burst + overload
+
+========================================
+Traffic Trace
+========================================
+Total generated events : 38197
+
+    baseline : 5092 requests
+      normal : 7983 requests
+ flash_burst : 5000 requests
+    recovery : 6957 requests
+    overload : 10210 requests
+    cooldown : 2955 requests
+
+Running TokenBucket...
+Running QueueProcess...
+
+========================================
+TokenBucket
+========================================
+Generated           : 38197
+Accepted            : 29988
+Rejected            : 8209
+Completed           : 29988
+Trace duration      : 4.5997 s
+Submission duration : 4.5998 s
+Total duration      : 4.5998 s
+Completion throughput: 6519.4415 tasks/s
+
+Phase results:
+
+  baseline
+    generated/accepted/rejected: 5092 / 5092 / 0
+    acceptance: 100.00%
+    decision latency p50/p95/p99: 0.08 / 0.57 / 0.90 us
+
+  normal
+    generated/accepted/rejected: 7983 / 7983 / 0
+    acceptance: 100.00%
+    decision latency p50/p95/p99: 0.06 / 0.45 / 0.84 us
+
+  flash_burst
+    generated/accepted/rejected: 5000 / 1004 / 3996
+    acceptance: 20.08%
+    decision latency p50/p95/p99: 0.05 / 0.05 / 0.05 us
+
+  recovery
+    generated/accepted/rejected: 6957 / 6957 / 0
+    acceptance: 100.00%
+    decision latency p50/p95/p99: 0.05 / 0.47 / 0.86 us
+
+  overload
+    generated/accepted/rejected: 10210 / 5997 / 4213
+    acceptance: 58.74%
+    decision latency p50/p95/p99: 0.04 / 0.38 / 0.52 us
+
+  cooldown
+    generated/accepted/rejected: 2955 / 2955 / 0
+    acceptance: 100.00%
+    decision latency p50/p95/p99: 0.09 / 0.75 / 1.10 us
+
+========================================
+QueueProcess
+========================================
+Generated           : 38197
+Accepted            : 36941
+Rejected            : 1256
+Completed           : 36941
+Trace duration      : 4.5997 s
+Submission duration : 4.5998 s
+Total duration      : 4.5998 s
+Completion throughput: 8030.9673 tasks/s
+Peak queue size     : 5000
+
+Phase results:
+
+  baseline
+    generated/accepted/rejected: 5092 / 5092 / 0
+    acceptance: 100.00%
+    queue wait p50/p95/p99: 6.16 / 181.34 / 309.73 us
+
+  normal
+    generated/accepted/rejected: 7983 / 7983 / 0
+    acceptance: 100.00%
+    queue wait p50/p95/p99: 104.27 / 621.29 / 959.06 us
+
+  flash_burst
+    generated/accepted/rejected: 5000 / 5000 / 0
+    acceptance: 100.00%
+    queue wait p50/p95/p99: 250156.08 / 475861.88 / 495918.22 us
+
+  recovery
+    generated/accepted/rejected: 6957 / 6957 / 0
+    acceptance: 100.00%
+    queue wait p50/p95/p99: 257039.10 / 391038.16 / 401126.19 us
+
+  overload
+    generated/accepted/rejected: 10210 / 8954 / 1256
+    acceptance: 87.70%
+    queue wait p50/p95/p99: 329966.29 / 504795.61 / 505258.17 us
+
+  cooldown
+    generated/accepted/rejected: 2955 / 2955 / 0
+    acceptance: 100.00%
+    queue wait p50/p95/p99: 150617.73 / 471657.18 / 496589.10 us
+
+========================================
+Summary
+========================================
+TokenBucket acceptance : 78.51%
+Queue acceptance      : 96.71%
+TokenBucket rejected  : 8209
+Queue rejected        : 1256
+Queue peak size       : 5000
+Queue total latency   : 4.60 s
+
+CSV: traffic_benchmark.csv

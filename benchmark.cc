@@ -1,146 +1,75 @@
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <condition_variable>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <fstream>
 #include <functional>
-#include <future>
 #include <iomanip>
 #include <iostream>
-#include <limits>
 #include <mutex>
 #include <queue>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 #include <cmath>
+#include <fstream>
 
 using namespace std;
-
 using Clock = chrono::steady_clock;
-using TimePoint = Clock::time_point;
 
-static const uint64_t TOTAL_REQUESTS = 10000000ULL;
+static constexpr long long NS_PER_SEC = 1000000000LL;
 
-long long nowTime() {
-    return chrono::duration_cast<chrono::milliseconds>(
+long long nowNs() {
+    return chrono::duration_cast<chrono::nanoseconds>(
         Clock::now().time_since_epoch()
     ).count();
 }
 
-uint64_t nsBetween(TimePoint start, TimePoint end) {
-    return static_cast<uint64_t>(
-        chrono::duration_cast<chrono::nanoseconds>(end - start).count()
-    );
-}
+// ============================================================
+// Corrected Token Bucket
+// ============================================================
 
-/*
-    Shared request result.
-
-    The benchmark measures:
-        request start -> request completion
-
-    This includes:
-        - Lock acquisition
-        - Queue waiting
-        - Callback execution
-        - Promise/future synchronization
-*/
-struct RequestResult {
-    bool accepted;
-    uint64_t latency_ns;
-};
-
-/*
-    Metrics collected by each implementation.
-*/
-struct Metrics {
-    atomic<uint64_t> completed;
-    atomic<uint64_t> accepted;
-    atomic<uint64_t> rejected;
-
-    atomic<uint64_t> worker_busy_ns;
-    atomic<uint64_t> worker_idle_ns;
-
-    atomic<uint64_t> max_queue_depth;
-
-    Metrics() {
-        completed.store(0);
-        accepted.store(0);
-        rejected.store(0);
-        worker_busy_ns.store(0);
-        worker_idle_ns.store(0);
-        max_queue_depth.store(0);
-    }
-
-    void record(const RequestResult& result) {
-        completed.fetch_add(1, memory_order_relaxed);
-
-        if (result.accepted) {
-            accepted.fetch_add(1, memory_order_relaxed);
-        } else {
-            rejected.fetch_add(1, memory_order_relaxed);
-        }
-    }
-};
-
-/*
-    Token Bucket
-
-    Same basic algorithm as your implementation.
-
-    capacity:
-        Maximum number of tokens.
-
-    refill_rate:
-        Tokens added per second.
-
-    Thread safety:
-        One mutex protects the complete bucket state.
-*/
 class TokenBucket {
+private:
     double tokens;
     unsigned int capacity;
     unsigned int refill_rate;
-    TimePoint last_time;
-
+    long long last_time;
     mutex mtx;
 
 public:
-    TokenBucket(unsigned int cap, unsigned int rate) {
-        tokens = cap;
-        capacity = cap;
-        refill_rate = rate;
-        last_time = Clock::now();
+    TokenBucket(unsigned int cap, unsigned int rate)
+        : tokens(static_cast<double>(cap)),
+          capacity(cap),
+          refill_rate(rate),
+          last_time(nowNs()) {
+        if (cap == 0 || rate == 0) {
+            throw invalid_argument(
+                "TokenBucket capacity/refill rate must be > 0"
+            );
+        }
     }
 
     bool allowRequest() {
         lock_guard<mutex> lock(mtx);
 
-        TimePoint now_time = Clock::now();
+        long long current = nowNs();
+        long long diff = current - last_time;
+        last_time = current;
 
-        long long diff =
-            chrono::duration_cast<chrono::milliseconds>(
-                now_time - last_time
-            ).count();
-
-        last_time = now_time;
-
-        double canAdd =
-            (diff / 1000.0) * refill_rate;
+        double added =
+            (static_cast<double>(diff) / NS_PER_SEC) *
+            static_cast<double>(refill_rate);
 
         tokens = min(
             static_cast<double>(capacity),
-            tokens + canAdd
+            tokens + added
         );
 
         if (tokens >= 1.0) {
-            --tokens;
+            tokens -= 1.0;
             return true;
         }
 
@@ -148,131 +77,99 @@ public:
     }
 };
 
-/*
-    QueueProcess
+// ============================================================
+// Corrected Queue Processor
+// ============================================================
 
-    One worker thread.
-
-    The worker does NOT sleep artificially.
-
-    It waits only when there is no work.
-
-    Worker busy time:
-        Time spent executing callbacks.
-
-    Worker idle time:
-        Time spent waiting for work or waiting on an empty queue.
-
-    This implementation also tracks the maximum queue depth.
-*/
 class QueueProcess {
-public:
+private:
     queue<function<void()>> q;
+    long long interval_ns;
+    size_t max_queue_size;
 
-    mutex mtx;
+    Clock::time_point next_exec_time;
+
+    mutable mutex mtx;
     condition_variable cv;
 
-    bool stopped;
+    bool stopped = false;
+    size_t peak_size = 0;
 
-    Metrics* metrics;
+public:
+    QueueProcess(unsigned int rate, size_t max_size)
+        : interval_ns(NS_PER_SEC / rate),
+          max_queue_size(max_size),
+          next_exec_time(Clock::now()) {
+        if (rate == 0 || max_size == 0) {
+            throw invalid_argument(
+                "QueueProcess rate/capacity must be > 0"
+            );
+        }
 
-    atomic<bool> running;
-
-    QueueProcess(Metrics* m) {
-        stopped = false;
-        metrics = m;
-        running.store(true);
+        if (interval_ns == 0) {
+            interval_ns = 1;
+        }
     }
 
     void processor() {
-        TimePoint idle_start = Clock::now();
-
         while (true) {
             function<void()> fn;
 
             {
                 unique_lock<mutex> lock(mtx);
 
-                /*
-                    We have started waiting for work.
-                */
-                idle_start = Clock::now();
-
                 cv.wait(lock, [this]() {
                     return !q.empty() || stopped;
                 });
 
-                /*
-                    We woke up because work is available,
-                    or because the queue is stopping.
-                */
-                TimePoint busy_start = Clock::now();
-
-                uint64_t idle_ns =
-                    nsBetween(idle_start, busy_start);
-
-                metrics->worker_idle_ns.fetch_add(
-                    idle_ns,
-                    memory_order_relaxed
-                );
-
                 if (stopped && q.empty()) {
-                    running.store(false);
                     return;
                 }
 
-                fn = q.front();
+                fn = move(q.front());
                 q.pop();
-
-                /*
-                    The worker is now executing work.
-                    The mutex is released before callback execution.
-                */
             }
 
-            TimePoint work_start = Clock::now();
+            Clock::time_point current = Clock::now();
+
+            if (current < next_exec_time) {
+                this_thread::sleep_until(next_exec_time);
+            }
 
             fn();
 
-            TimePoint work_end = Clock::now();
+            next_exec_time +=
+                chrono::nanoseconds(interval_ns);
 
-            uint64_t busy_ns =
-                nsBetween(work_start, work_end);
+            current = Clock::now();
 
-            metrics->worker_busy_ns.fetch_add(
-                busy_ns,
-                memory_order_relaxed
-            );
+            if (next_exec_time < current) {
+                next_exec_time = current;
+            }
         }
     }
 
-    void newRequest(function<void()> fn) {
-        uint64_t current_depth;
-
+    bool newRequest(function<void()> fn) {
         {
             lock_guard<mutex> lock(mtx);
 
-            q.push(fn);
+            if (stopped) {
+                return false;
+            }
 
-            current_depth = q.size();
-        }
+            if (q.size() >= max_queue_size) {
+                return false;
+            }
 
-        uint64_t old_depth =
-            metrics->max_queue_depth.load(
-                memory_order_relaxed
-            );
+            q.push(move(fn));
 
-        while (
-            current_depth > old_depth &&
-            !metrics->max_queue_depth.compare_exchange_weak(
-                old_depth,
-                current_depth,
-                memory_order_relaxed
-            )
-        ) {
+            if (q.size() > peak_size) {
+                peak_size = q.size();
+            }
         }
 
         cv.notify_one();
+        return true;
     }
 
     void stop() {
@@ -283,426 +180,763 @@ public:
 
         cv.notify_all();
     }
+
+    size_t peakQueueSize() const {
+        lock_guard<mutex> lock(mtx);
+        return peak_size;
+    }
 };
 
-/*
-    Request arrival schedule.
+// ============================================================
+// Traffic trace
+//
+// The important part:
+// BOTH algorithms receive the exact same trace.
+//
+// Profiles:
+//   1. Baseline      : Poisson 5k/s for 1s
+//   2. Normal        : Poisson 8k/s for 1s
+//   3. Flash burst   : 5,000 requests immediately
+//   4. Recovery      : Poisson 7k/s for 1s
+//   5. Overload      : Poisson 20k/s for 0.5s
+//   6. Cooldown      : Poisson 3k/s for 1s
+//
+// Default limit:
+//   Token bucket refill = 10k/s, capacity = 1k
+//   Queue service       = 10k/s, capacity = 5k
+//
+// This creates:
+//   - normal traffic
+//   - true instantaneous bursts
+//   - sustained overload
+//   - recovery after overload
+// ============================================================
 
-    Generates exponential inter-arrival times.
+enum class PhaseType {
+    POISSON,
+    BURST
+};
 
-    If arrival_rate = 100000:
-        Mean interval = 1 / 100000 seconds
-                     = 10 microseconds
+struct Phase {
+    string name;
+    PhaseType type;
+    double rate;
+    long long duration_ns;
+    long long burst_count;
+};
 
-    The same schedule is used for both implementations.
-*/
-vector<uint64_t> generateArrivals(
-    uint64_t count,
-    double arrival_rate,
-    uint64_t seed
-) {
-    vector<uint64_t> arrivals;
-    arrivals.reserve(count);
+struct RequestEvent {
+    long long offset_ns;
+    int phase;
+    long long sequence;
+};
 
-    mt19937_64 rng(seed);
+struct PhaseStats {
+    long long generated = 0;
+    long long accepted = 0;
+    long long rejected = 0;
 
-    exponential_distribution<double> distribution(
-        arrival_rate
-    );
+    vector<double> latency_us;
+};
 
-    uint64_t current_ns = 0;
+struct BenchmarkResult {
+    string name;
 
-    for (uint64_t i = 0; i < count; ++i) {
-        double interval_seconds = distribution(rng);
+    long long generated = 0;
+    long long accepted = 0;
+    long long rejected = 0;
+    long long completed = 0;
 
-        uint64_t interval_ns =
-            static_cast<uint64_t>(
-                interval_seconds * 1000000000.0
-            );
+    double trace_seconds = 0.0;
+    double submission_seconds = 0.0;
+    double total_seconds = 0.0;
+    double completion_throughput = 0.0;
 
-        current_ns += interval_ns;
+    size_t peak_queue = 0;
 
-        arrivals.push_back(current_ns);
+    vector<PhaseStats> phases;
+};
+
+long long secondsToNs(double seconds) {
+    long double ns =
+        static_cast<long double>(seconds) *
+        static_cast<long double>(NS_PER_SEC);
+
+    if (ns < 1.0L) {
+        return 1;
     }
 
-    return arrivals;
+    if (ns > static_cast<long double>(LLONG_MAX)) {
+        throw overflow_error("Traffic phase too long");
+    }
+
+    return static_cast<long long>(ns);
 }
 
-/*
-    Percentile calculation.
+vector<RequestEvent> buildTrafficTrace(
+    const vector<Phase>& phases,
+    unsigned int seed
+) {
+    mt19937_64 rng(seed);
 
-    Input must be sorted.
-*/
+    vector<RequestEvent> trace;
+
+    long long phase_start = 0;
+    long long sequence = 0;
+
+    for (size_t phase_id = 0;
+         phase_id < phases.size();
+         ++phase_id) {
+
+        const Phase& phase = phases[phase_id];
+
+        if (phase.type == PhaseType::BURST) {
+            for (long long i = 0;
+                 i < phase.burst_count;
+                 ++i) {
+
+                trace.push_back({
+                    phase_start,
+                    static_cast<int>(phase_id),
+                    sequence++
+                });
+            }
+        } else {
+            exponential_distribution<double> distribution(
+                phase.rate
+            );
+
+            long long offset = 0;
+
+            while (true) {
+                double gap_seconds = distribution(rng);
+
+                long long gap_ns =
+                    secondsToNs(gap_seconds);
+
+                offset += gap_ns;
+
+                if (offset >= phase.duration_ns) {
+                    break;
+                }
+
+                trace.push_back({
+                    phase_start + offset,
+                    static_cast<int>(phase_id),
+                    sequence++
+                });
+            }
+        }
+
+        phase_start += phase.duration_ns;
+    }
+
+    sort(
+        trace.begin(),
+        trace.end(),
+        [](const RequestEvent& a, const RequestEvent& b) {
+            if (a.offset_ns != b.offset_ns) {
+                return a.offset_ns < b.offset_ns;
+            }
+
+            return a.sequence < b.sequence;
+        }
+    );
+
+    return trace;
+}
+
+// ============================================================
+// Statistics
+// ============================================================
+
 double percentile(
-    const vector<uint64_t>& values,
+    vector<double> values,
     double p
 ) {
     if (values.empty()) {
         return 0.0;
     }
 
-    size_t index =
-        static_cast<size_t>(
-            p * static_cast<double>(values.size() - 1)
-        );
+    sort(values.begin(), values.end());
 
-    return static_cast<double>(values[index]) / 1000.0;
-}
+    double index =
+        (p / 100.0) *
+        static_cast<double>(values.size() - 1);
 
-/*
-    Benchmark output.
+    size_t low = static_cast<size_t>(floor(index));
+    size_t high = static_cast<size_t>(ceil(index));
 
-    Latencies are converted:
-        ns -> microseconds
-*/
-void printReport(
-    const string& name,
-    const Metrics& metrics,
-    vector<uint64_t>& latencies,
-    double wall_seconds
-) {
-    sort(latencies.begin(), latencies.end());
-
-    uint64_t completed =
-        metrics.completed.load();
-
-    uint64_t accepted =
-        metrics.accepted.load();
-
-    uint64_t rejected =
-        metrics.rejected.load();
-
-    uint64_t busy_ns =
-        metrics.worker_busy_ns.load();
-
-    uint64_t idle_ns =
-        metrics.worker_idle_ns.load();
-
-    uint64_t max_depth =
-        metrics.max_queue_depth.load();
-
-    double throughput =
-        static_cast<double>(completed) / wall_seconds;
-
-    double busy_seconds =
-        static_cast<double>(busy_ns) / 1000000000.0;
-
-    double idle_seconds =
-        static_cast<double>(idle_ns) / 1000000000.0;
-
-    double utilization = 0.0;
-
-    if (busy_seconds + idle_seconds > 0.0) {
-        utilization =
-            busy_seconds /
-            (busy_seconds + idle_seconds) *
-            100.0;
+    if (low == high) {
+        return values[low];
     }
 
-    cout << "\n";
-    cout << "========================================\n";
-    cout << name << "\n";
-    cout << "========================================\n";
+    double fraction = index - static_cast<double>(low);
 
-    cout << fixed << setprecision(3);
-
-    cout << "Total requests       : "
-         << TOTAL_REQUESTS << "\n";
-
-    cout << "Completed            : "
-         << completed << "\n";
-
-    cout << "Accepted             : "
-         << accepted << "\n";
-
-    cout << "Rejected             : "
-         << rejected << "\n";
-
-    cout << "Wall time (seconds)  : "
-         << wall_seconds << "\n";
-
-    cout << "Throughput (req/s)   : "
-         << throughput << "\n";
-
-    cout << "\n";
-    cout << "Latency (microseconds)\n";
-
-    cout << "p50                  : "
-         << percentile(latencies, 0.50) << "\n";
-
-    cout << "p95                  : "
-         << percentile(latencies, 0.95) << "\n";
-
-    cout << "p99                  : "
-         << percentile(latencies, 0.99) << "\n";
-
-    cout << "max                  : "
-         << percentile(latencies, 1.00) << "\n";
-
-    cout << "\n";
-    cout << "Worker metrics\n";
-
-    cout << "Busy time (seconds)  : "
-         << busy_seconds << "\n";
-
-    cout << "Idle time (seconds)  : "
-         << idle_seconds << "\n";
-
-    cout << "Worker utilization   : "
-         << utilization << "%\n";
-
-    cout << "Max queue depth      : "
-         << max_depth << "\n";
-
-    cout << "========================================\n";
+    return values[low] +
+           fraction * (values[high] - values[low]);
 }
 
-/*
-    Benchmark TokenBucket.
+void printPercentiles(
+    const string& label,
+    const vector<double>& samples
+) {
+    cout << "    " << label
+         << " p50/p95/p99: "
+         << fixed << setprecision(2)
+         << percentile(samples, 50.0) << " / "
+         << percentile(samples, 95.0) << " / "
+         << percentile(samples, 99.0)
+         << " us\n";
+}
 
-    Important:
-        We generate the exact same arrival schedule
-        used by QueueProcess.
+// ============================================================
+// Token Bucket replay
+// ============================================================
 
-    The sleep is in the traffic generator, not
-    inside the rate limiter.
-*/
-void benchmarkTokenBucket(
-    const vector<uint64_t>& arrivals,
+BenchmarkResult runTokenBucket(
+    const vector<RequestEvent>& trace,
+    const vector<Phase>& phases,
     unsigned int capacity,
     unsigned int refill_rate
 ) {
-    cout << "\nStarting TokenBucket benchmark...\n";
-
-    Metrics metrics;
-
     TokenBucket bucket(capacity, refill_rate);
 
-    vector<uint64_t> latencies;
-    latencies.reserve(TOTAL_REQUESTS);
+    BenchmarkResult result;
+    result.name = "TokenBucket";
+    result.phases.resize(phases.size());
 
-    TimePoint benchmark_start = Clock::now();
+    Clock::time_point replay_start = Clock::now();
 
-    TimePoint next_arrival = benchmark_start;
+    long long last_offset = 0;
 
-    for (uint64_t i = 0; i < TOTAL_REQUESTS; ++i) {
-        next_arrival =
-            benchmark_start +
-            chrono::nanoseconds(arrivals[i]);
+    for (const RequestEvent& event : trace) {
+        Clock::time_point target =
+            replay_start +
+            chrono::nanoseconds(event.offset_ns);
 
-        /*
-            Real-time traffic generation.
+        this_thread::sleep_until(target);
 
-            No sleep inside TokenBucket.
-        */
-        this_thread::sleep_until(next_arrival);
+        Clock::time_point decision_start = Clock::now();
 
-        TimePoint request_start = Clock::now();
+        bool accepted = bucket.allowRequest();
 
-        bool allowed = bucket.allowRequest();
+        Clock::time_point decision_end = Clock::now();
 
-        TimePoint request_end = Clock::now();
+        double decision_us =
+            chrono::duration<double, micro>(
+                decision_end - decision_start
+            ).count();
 
-        uint64_t latency_ns =
-            nsBetween(request_start, request_end);
+        PhaseStats& stats =
+            result.phases[event.phase];
 
-        RequestResult result;
-        result.accepted = allowed;
-        result.latency_ns = latency_ns;
+        ++stats.generated;
 
-        metrics.record(result);
+        if (accepted) {
+            ++stats.accepted;
+        } else {
+            ++stats.rejected;
+        }
 
-        latencies.push_back(latency_ns);
+        stats.latency_us.push_back(decision_us);
+
+        last_offset = event.offset_ns;
     }
 
-    TimePoint benchmark_end = Clock::now();
+    Clock::time_point end = Clock::now();
 
-    double wall_seconds =
-        static_cast<double>(
-            chrono::duration_cast<chrono::nanoseconds>(
-                benchmark_end - benchmark_start
-            ).count()
-        ) / 1000000000.0;
+    result.generated =
+        static_cast<long long>(trace.size());
 
-    printReport(
-        "TokenBucket",
-        metrics,
-        latencies,
-        wall_seconds
-    );
+    for (const PhaseStats& stats : result.phases) {
+        result.accepted += stats.accepted;
+        result.rejected += stats.rejected;
+    }
+
+    result.completed = result.accepted;
+
+    result.trace_seconds =
+        static_cast<double>(last_offset) /
+        NS_PER_SEC;
+
+    result.submission_seconds =
+        chrono::duration<double>(
+            end - replay_start
+        ).count();
+
+    result.total_seconds =
+        result.submission_seconds;
+
+    if (result.total_seconds > 0.0) {
+        result.completion_throughput =
+            static_cast<double>(result.completed) /
+            result.total_seconds;
+    }
+
+    return result;
 }
 
-/*
-    Benchmark QueueProcess.
+// ============================================================
+// Queue Process replay
+// ============================================================
 
-    Every request is placed into the queue.
-
-    The promise/future is used to measure the time
-    until the worker finishes the request.
-
-    The callback itself performs no artificial sleep.
-*/
-void benchmarkQueueProcess(
-    const vector<uint64_t>& arrivals
+BenchmarkResult runQueueProcess(
+    const vector<RequestEvent>& trace,
+    const vector<Phase>& phases,
+    unsigned int service_rate,
+    size_t queue_capacity
 ) {
-    cout << "\nStarting QueueProcess benchmark...\n";
-
-    Metrics metrics;
-
-    QueueProcess qp(&metrics);
-
-    thread worker(
-        &QueueProcess::processor,
-        &qp
+    QueueProcess processor(
+        service_rate,
+        queue_capacity
     );
 
-    vector<uint64_t> latencies;
-    latencies.reserve(TOTAL_REQUESTS);
+    BenchmarkResult result;
+    result.name = "QueueProcess";
+    result.phases.resize(phases.size());
 
-    TimePoint benchmark_start = Clock::now();
+    atomic<long long> completed(0);
 
-    TimePoint next_arrival = benchmark_start;
+    thread worker([&processor]() {
+        processor.processor();
+    });
 
-    for (uint64_t i = 0; i < TOTAL_REQUESTS; ++i) {
-        next_arrival =
-            benchmark_start +
-            chrono::nanoseconds(arrivals[i]);
+    Clock::time_point replay_start = Clock::now();
 
-        /*
-            Traffic generator delay only.
-            No artificial delay in the worker.
-        */
-        this_thread::sleep_until(next_arrival);
+    long long last_offset = 0;
 
-        TimePoint request_start = Clock::now();
+    for (const RequestEvent& event : trace) {
+        Clock::time_point target =
+            replay_start +
+            chrono::nanoseconds(event.offset_ns);
 
-        shared_ptr<promise<RequestResult>> prom =
-            make_shared<promise<RequestResult>>();
+        this_thread::sleep_until(target);
 
-        future<RequestResult> ft =
-            prom->get_future();
+        Clock::time_point arrival = Clock::now();
 
-        qp.newRequest(
-            [prom, request_start]() mutable {
-                TimePoint request_end = Clock::now();
+        PhaseStats& stats =
+            result.phases[event.phase];
 
-                RequestResult result;
-                result.accepted = true;
-                result.latency_ns =
-                    nsBetween(request_start, request_end);
+        ++stats.generated;
 
-                prom->set_value(result);
-            }
-        );
+        bool accepted =
+            processor.newRequest(
+                [&, phase = event.phase, arrival]() {
+                    Clock::time_point completion =
+                        Clock::now();
 
-        RequestResult result = ft.get();
+                    double wait_us =
+                        chrono::duration<double, micro>(
+                            completion - arrival
+                        ).count();
 
-        metrics.record(result);
+                    result.phases[phase]
+                        .latency_us
+                        .push_back(wait_us);
 
-        latencies.push_back(result.latency_ns);
+                    completed.fetch_add(1);
+                }
+            );
+
+        if (accepted) {
+            ++stats.accepted;
+        } else {
+            ++stats.rejected;
+        }
+
+        last_offset = event.offset_ns;
     }
 
-    /*
-        Stop after all requests have completed.
+    Clock::time_point submission_end = Clock::now();
 
-        The worker drains any remaining work,
-        then exits.
-    */
-    qp.stop();
-
+    // Graceful shutdown: finish all accepted work.
+    processor.stop();
     worker.join();
 
-    TimePoint benchmark_end = Clock::now();
+    Clock::time_point total_end = Clock::now();
 
-    double wall_seconds =
-        static_cast<double>(
-            chrono::duration_cast<chrono::nanoseconds>(
-                benchmark_end - benchmark_start
-            ).count()
-        ) / 1000000000.0;
+    result.generated =
+        static_cast<long long>(trace.size());
 
-    printReport(
-        "QueueProcess",
-        metrics,
-        latencies,
-        wall_seconds
-    );
+    for (const PhaseStats& stats : result.phases) {
+        result.accepted += stats.accepted;
+        result.rejected += stats.rejected;
+    }
+
+    result.completed = completed.load();
+
+    result.trace_seconds =
+        static_cast<double>(last_offset) /
+        NS_PER_SEC;
+
+    result.submission_seconds =
+        chrono::duration<double>(
+            submission_end - replay_start
+        ).count();
+
+    result.total_seconds =
+        chrono::duration<double>(
+            total_end - replay_start
+        ).count();
+
+    result.completion_throughput =
+        result.total_seconds > 0.0
+            ? static_cast<double>(result.completed) /
+              result.total_seconds
+            : 0.0;
+
+    result.peak_queue =
+        processor.peakQueueSize();
+
+    return result;
 }
 
-int main(int argc, char** argv) {
-    double arrival_rate = 100000.0;
+// ============================================================
+// Output
+// ============================================================
 
-    unsigned int capacity = 10;
-    unsigned int refill_rate = 1;
+void printTraffic(
+    const vector<Phase>& phases,
+    const vector<RequestEvent>& trace
+) {
+    cout << "\n========================================\n";
+    cout << "Traffic Trace\n";
+    cout << "========================================\n";
 
-    uint64_t seed = 42;
+    cout << "Total generated events : "
+         << trace.size() << "\n\n";
+
+    for (size_t i = 0; i < phases.size(); ++i) {
+        long long count = 0;
+
+        for (const RequestEvent& event : trace) {
+            if (event.phase == static_cast<int>(i)) {
+                ++count;
+            }
+        }
+
+        cout << setw(12)
+             << phases[i].name
+             << " : "
+             << count
+             << " requests\n";
+    }
+}
+
+void printResult(
+    const BenchmarkResult& result,
+    const vector<Phase>& phases
+) {
+    cout << "\n========================================\n";
+    cout << result.name << "\n";
+    cout << "========================================\n";
+
+    cout << "Generated           : "
+         << result.generated << "\n";
+
+    cout << "Accepted            : "
+         << result.accepted << "\n";
+
+    cout << "Rejected            : "
+         << result.rejected << "\n";
+
+    cout << "Completed           : "
+         << result.completed << "\n";
+
+    cout << fixed << setprecision(4);
+
+    cout << "Trace duration      : "
+         << result.trace_seconds
+         << " s\n";
+
+    cout << "Submission duration : "
+         << result.submission_seconds
+         << " s\n";
+
+    cout << "Total duration      : "
+         << result.total_seconds
+         << " s\n";
+
+    cout << "Completion throughput: "
+         << result.completion_throughput
+         << " tasks/s\n";
+
+    if (result.name == "QueueProcess") {
+        cout << "Peak queue size     : "
+             << result.peak_queue
+             << "\n";
+    }
+
+    cout << "\nPhase results:\n";
+
+    for (size_t i = 0; i < phases.size(); ++i) {
+        const PhaseStats& stats = result.phases[i];
+
+        double acceptance =
+            stats.generated > 0
+                ? static_cast<double>(stats.accepted) /
+                  stats.generated * 100.0
+                : 0.0;
+
+        cout << "\n  " << phases[i].name << "\n";
+
+        cout << "    generated/accepted/rejected: "
+             << stats.generated << " / "
+             << stats.accepted << " / "
+             << stats.rejected << "\n";
+
+        cout << "    acceptance: "
+             << fixed << setprecision(2)
+             << acceptance
+             << "%\n";
+
+        if (result.name == "TokenBucket") {
+            printPercentiles(
+                "decision latency",
+                stats.latency_us
+            );
+        } else {
+            printPercentiles(
+                "queue wait",
+                stats.latency_us
+            );
+        }
+    }
+}
+
+void writeCsv(
+    const string& filename,
+    const vector<Phase>& phases,
+    const BenchmarkResult& token,
+    const BenchmarkResult& queue
+) {
+    ofstream output(filename);
+
+    output
+        << "system,phase,generated,accepted,rejected,"
+        << "acceptance_pct,p50_us,p95_us,p99_us\n";
+
+    for (size_t i = 0; i < phases.size(); ++i) {
+        const PhaseStats& a = token.phases[i];
+
+        double a_acceptance =
+            a.generated > 0
+                ? 100.0 * a.accepted / a.generated
+                : 0.0;
+
+        output
+            << "TokenBucket,"
+            << phases[i].name << ","
+            << a.generated << ","
+            << a.accepted << ","
+            << a.rejected << ","
+            << a_acceptance << ","
+            << percentile(a.latency_us, 50.0) << ","
+            << percentile(a.latency_us, 95.0) << ","
+            << percentile(a.latency_us, 99.0)
+            << "\n";
+
+        const PhaseStats& b = queue.phases[i];
+
+        double b_acceptance =
+            b.generated > 0
+                ? 100.0 * b.accepted / b.generated
+                : 0.0;
+
+        output
+            << "QueueProcess,"
+            << phases[i].name << ","
+            << b.generated << ","
+            << b.accepted << ","
+            << b.rejected << ","
+            << b_acceptance << ","
+            << percentile(b.latency_us, 50.0) << ","
+            << percentile(b.latency_us, 95.0) << ","
+            << percentile(b.latency_us, 99.0)
+            << "\n";
+    }
+}
+
+// ============================================================
+// Main
+//
+// Arguments:
+//   1 = token refill/service rate
+//   2 = token capacity
+//   3 = queue capacity
+//   4 = random seed
+//
+// Example:
+//   ./benchmark_traffic 10000 1000 5000 42
+// ============================================================
+
+int main(int argc, char* argv[]) {
+    unsigned int rate = 10000;
+    unsigned int token_capacity = 1000;
+    size_t queue_capacity = 5000;
+    unsigned int seed = 42;
 
     if (argc >= 2) {
-        arrival_rate = atof(argv[1]);
+        rate = stoul(argv[1]);
     }
 
     if (argc >= 3) {
-        capacity = static_cast<unsigned int>(
-            atoi(argv[2])
-        );
+        token_capacity = stoul(argv[2]);
     }
 
     if (argc >= 4) {
-        refill_rate = static_cast<unsigned int>(
-            atoi(argv[3])
+        queue_capacity = stoul(argv[3]);
+    }
+
+    if (argc >= 5) {
+        seed = stoul(argv[4]);
+    }
+
+    if (rate == 0 ||
+        token_capacity == 0 ||
+        queue_capacity == 0) {
+        throw invalid_argument(
+            "Rates and capacities must be > 0"
         );
     }
 
-    if (arrival_rate <= 0.0) {
-        cerr << "Arrival rate must be > 0\n";
-        return 1;
-    }
+    vector<Phase> phases = {
+        {
+            "baseline",
+            PhaseType::POISSON,
+            5000.0,
+            secondsToNs(1.0),
+            0
+        },
+        {
+            "normal",
+            PhaseType::POISSON,
+            8000.0,
+            secondsToNs(1.0),
+            0
+        },
+        {
+            "flash_burst",
+            PhaseType::BURST,
+            0.0,
+            secondsToNs(0.1),
+            5000
+        },
+        {
+            "recovery",
+            PhaseType::POISSON,
+            7000.0,
+            secondsToNs(1.0),
+            0
+        },
+        {
+            "overload",
+            PhaseType::POISSON,
+            20000.0,
+            secondsToNs(0.5),
+            0
+        },
+        {
+            "cooldown",
+            PhaseType::POISSON,
+            3000.0,
+            secondsToNs(1.0),
+            0
+        }
+    };
+
+    vector<RequestEvent> trace =
+        buildTrafficTrace(phases, seed);
 
     cout << "========================================\n";
-    cout << "Rate Limiter Benchmark\n";
+    cout << "Realistic Traffic Rate-Limiter Benchmark\n";
     cout << "========================================\n";
 
-    cout << "Requests              : "
-         << TOTAL_REQUESTS << "\n";
+    cout << "Rate limit         : "
+         << rate << " req/s\n";
 
-    cout << "Arrival rate          : "
-         << arrival_rate << " req/s\n";
+    cout << "Token capacity     : "
+         << token_capacity << "\n";
 
-    cout << "Token capacity        : "
-         << capacity << "\n";
+    cout << "Queue capacity     : "
+         << queue_capacity << "\n";
 
-    cout << "Token refill rate     : "
-         << refill_rate << " tokens/s\n";
-
-    cout << "Random seed           : "
+    cout << "Random seed        : "
          << seed << "\n";
 
-    cout << "========================================\n";
+    cout << "Traffic model      : "
+         << "Poisson + flash burst + overload\n";
 
-    cout << "\nGenerating arrival schedule...\n";
+    printTraffic(phases, trace);
 
-    vector<uint64_t> arrivals =
-        generateArrivals(
-            TOTAL_REQUESTS,
-            arrival_rate,
-            seed
+    cout << "\nRunning TokenBucket...\n";
+
+    BenchmarkResult token_result =
+        runTokenBucket(
+            trace,
+            phases,
+            token_capacity,
+            rate
         );
 
-    cout << "Arrival schedule ready.\n";
+    cout << "Running QueueProcess...\n";
 
-    /*
-        Both tests use the same arrivals.
+    BenchmarkResult queue_result =
+        runQueueProcess(
+            trace,
+            phases,
+            rate,
+            queue_capacity
+        );
 
-        Each test is run independently.
-    */
-    benchmarkTokenBucket(
-        arrivals,
-        capacity,
-        refill_rate
-    );
+    printResult(token_result, phases);
+    printResult(queue_result, phases);
 
-    benchmarkQueueProcess(
-        arrivals
+    cout << "\n========================================\n";
+    cout << "Summary\n";
+    cout << "========================================\n";
+
+    double token_acceptance =
+        token_result.generated > 0
+            ? 100.0 * token_result.accepted /
+              token_result.generated
+            : 0.0;
+
+    double queue_acceptance =
+        queue_result.generated > 0
+            ? 100.0 * queue_result.accepted /
+              queue_result.generated
+            : 0.0;
+
+    cout << fixed << setprecision(2);
+
+    cout << "TokenBucket acceptance : "
+         << token_acceptance << "%\n";
+
+    cout << "Queue acceptance      : "
+         << queue_acceptance << "%\n";
+
+    cout << "TokenBucket rejected  : "
+         << token_result.rejected << "\n";
+
+    cout << "Queue rejected        : "
+         << queue_result.rejected << "\n";
+
+    cout << "Queue peak size       : "
+         << queue_result.peak_queue << "\n";
+
+    cout << "Queue total latency   : "
+         << queue_result.total_seconds
+         << " s\n";
+
+    cout << "\nCSV: traffic_benchmark.csv\n";
+
+    writeCsv(
+        "traffic_benchmark.csv",
+        phases,
+        token_result,
+        queue_result
     );
 
     return 0;

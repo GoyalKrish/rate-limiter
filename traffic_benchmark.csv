@@ -1,0 +1,13 @@
+system,phase,generated,accepted,rejected,acceptance_pct,p50_us,p95_us,p99_us
+TokenBucket,baseline,5092,5092,0,100,0.077,0.572,0.89754
+QueueProcess,baseline,5092,5092,0,100,6.16,181.338,309.731
+TokenBucket,normal,7983,7983,0,100,0.056,0.4508,0.838
+QueueProcess,normal,7983,7983,0,100,104.272,621.292,959.062
+TokenBucket,flash_burst,5000,1004,3996,20.08,0.051,0.052,0.052
+QueueProcess,flash_burst,5000,5000,0,100,250156,475862,495918
+TokenBucket,recovery,6957,6957,0,100,0.052,0.4694,0.858
+QueueProcess,recovery,6957,6957,0,100,257039,391038,401126
+TokenBucket,overload,10210,5997,4213,58.7365,0.036,0.3781,0.52
+QueueProcess,overload,10210,8954,1256,87.6983,329966,504796,505258
+TokenBucket,cooldown,2955,2955,0,100,0.092,0.754,1.09792
+QueueProcess,cooldown,2955,2955,0,100,150618,471657,496589

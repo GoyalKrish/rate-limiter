@@ -1,0 +1,29 @@
+========================================
+TokenBucket vs QueueProcess Benchmark
+========================================
+Total requests   : 100000
+Arrival rate     : 100000 req/sec
+Token capacity   : 1000
+Queue capacity   : 1000
+Producer threads : 4
+
+========================================
+TokenBucket
+========================================
+Generated requests : 100000
+Accepted requests  : 100000
+Rejected requests  : 0
+Completed tasks    : 100000
+Elapsed time       : 1.0002 seconds
+Throughput         : 99982.2572 tasks/sec
+
+========================================
+QueueProcess
+========================================
+Generated requests : 100000
+Accepted requests  : 33595
+Rejected requests  : 66405
+Completed tasks    : 33595
+Elapsed time       : 1.0307 seconds
+Throughput         : 32595.5502 tasks/sec
+Peak queue size    : 1000
