@@ -1,7 +1,80 @@
-exploring rate limiters made me realize it's more than just a "go or no go" system.. it uses multiple algorithms to efficiently manage traffic and optimize resource utilization.
-check out the code and the benchmark results here : https://github.com/goyalkrish/rate-limiter
 
-<img width="2560" height="2560" alt="WhatsApp Image 2026-09-16 at 1 23 33 AM (3)" src="https://github.com/user-attachments/assets/1f2e3097-615d-4c1c-85e2-13f1ddfcbdef" />
-<img width="2560" height="2560" alt="WhatsApp Image 2026-09-16 at 1 23 33 AM (1)" src="https://github.com/user-attachments/assets/2623689c-e8fc-4d23-a3fa-8211854ff2c7" />
-<img width="2560" height="2560" alt="WhatsApp Image 2026-09-16 at 1 23 33 AM (2)" src="https://github.com/user-attachments/assets/e766fab5-1920-46f5-aa4f-e9ec4d26fde9" />
-<img width="2560" height="2560" alt="WhatsApp Image 2026-09-16 at 1 23 33 AM" src="https://github.com/user-attachments/assets/46dc9493-cf7b-4deb-9529-847486c08d5a" />
+# Rate Limiter
+
+Simple C++ implementations of common rate-limiting algorithms, along with benchmarks.
+
+Rate limiters are more than simple allow/deny checks. Different algorithms make different trade-offs between latency, burst handling, and how strictly they protect resources.
+
+This repository contains:
+
+- **Token Bucket**
+- **Queue-based processor** (Leaky Bucket style)
+
+## Algorithms
+
+### Token Bucket
+- Tokens are added at a fixed rate up to a maximum capacity.
+- A request is allowed only if at least one token is available.
+- Supports bursts up to the capacity, then settles to the refill rate.
+- Decision is very fast (usually sub-microsecond in these benchmarks).
+- Excess requests are rejected immediately.
+
+### QueueProcess (Leaky Bucket style)
+- Incoming requests are placed in a queue.
+- A worker processes them at a controlled rate.
+- Can accept more requests under burst by queuing them.
+- Introduces latency while requests wait in the queue.
+- Protects the downstream system by smoothing traffic.
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `RateLimiter.h` | Core implementations of TokenBucket and QueueProcess |
+| `benchmark.cc` | Detailed benchmark comparing both approaches |
+| `test.cc` | Example usage with the Crow HTTP framework |
+| `monitor.sh` | Helper script for running benchmarks with system monitoring |
+| `benchmark_results_*/` | Sample benchmark output |
+
+## Building & Running
+
+```bash
+# Compile the benchmark
+g++ -O2 -std=c++17 benchmark.cc -o benchmark -pthread
+
+# Run with default parameters
+./benchmark
+
+# Or use the monitor script (example)
+./monitor.sh <arrival_rate> <capacity> <refill_rate>
+```
+
+Example:
+```bash
+./monitor.sh 100000 1000 100000
+```
+
+## Example Results
+
+Benchmarks were run with 10 million requests at high arrival rates.
+
+**Token Bucket** (low capacity example):
+- Extremely low decision latency (p50 often < 0.1 µs)
+- Rejects the large majority of requests under sustained overload
+- No queuing — decisions are immediate
+
+**QueueProcess**:
+- Accepts essentially all requests (within queue limits)
+- Higher latency due to queuing (p50 in the low microseconds range in these runs)
+- Smooths traffic for the downstream system
+
+Exact numbers vary with capacity, refill rate, and arrival pattern. See the `benchmark_results_*` folders and `res.txt` for full output.
+
+## Notes
+
+- The implementations are intentionally straightforward for learning and comparison.
+- Token Bucket is better when you want fast rejection and controlled bursts.
+- The queue-based approach is better when you prefer to accept and smooth traffic rather than drop it.
+- Both are single-process and use mutexes; they are not distributed rate limiters.
+
+Feel free to experiment with different capacities, rates, and arrival patterns.
